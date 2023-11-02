@@ -127,6 +127,26 @@ pub struct MultiWatcher {
     runtime: Handle,
 }
 
+#[derive(Debug)]
+pub struct Entry {
+    event: WatchedEvent,
+    index: usize,
+}
+
+impl Deref for Entry {
+    type Target = WatchedEvent;
+
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
+impl From<Entry> for WatchedEvent {
+    fn from(value: Entry) -> Self {
+        value.event
+    }
+}
+
 impl MultiWatcher {
     fn new(runtime: Handle, watchers: impl IntoIterator<Item = PersistentWatcher>) -> Self {
         Self {
@@ -135,16 +155,40 @@ impl MultiWatcher {
         }
     }
 
-    pub fn changed(&mut self) -> WatchedEvent {
+    pub fn changed(&mut self) -> Entry {
         let future = futures::future::select_all(
             self.watchers
                 .iter_mut()
                 .map(|watcher| Box::pin(watcher.changed())),
         );
-        self.runtime.block_on(async { future.await.0 })
+        let future = self.runtime.block_on(future);
+
+        Entry {
+            event: future.0,
+            index: future.1,
+        }
     }
 
-    pub fn remove(self) -> Result<(), Error> {
+    /// The `Entry` must come from the LAST `changed`, if not you
+    /// may remove the wrong watcher or worse, cause a panic.
+    pub fn remove(&mut self, entry: Entry) -> Result<()> {
+        let watcher = self.watchers.remove(entry.index);
+
+        self.runtime.block_on(watcher.remove())
+    }
+
+    /// The `Entry` must come from the LAST `changed`, if not you
+    /// may remove the wrong watcher or worse, cause a panic.
+    ///
+    /// Can return an error if the old watcher couldn't be closed successfully,
+    /// but the new watcher will be inserted anyway.
+    pub fn replace(&mut self, entry: Entry, watcher: Watcher) -> Result<()> {
+        let watcher_to_remove = std::mem::replace(&mut self.watchers[entry.index], watcher.watcher);
+
+        self.runtime.block_on(watcher_to_remove.remove())
+    }
+
+    pub fn remove_all(self) -> Result<()> {
         let error = self.runtime.block_on(async {
             let mut error = None;
             for watcher in self.watchers {
