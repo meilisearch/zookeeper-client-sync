@@ -46,55 +46,46 @@ impl Zookeeper {
         data: &[u8],
         options: &CreateOptions<'_>,
     ) -> Result<(Stat, CreateSequence)> {
-        self.runtime
-            .block_on(self.client.create(path, data, options))
+        futures::executor::block_on(self.client.create(path, data, options))
     }
 
     pub fn delete(&self, path: &str, expected_version: Option<i32>) -> Result<(), Error> {
-        self.runtime
-            .block_on(self.client.delete(path, expected_version))
+        futures::executor::block_on(self.client.delete(path, expected_version))
     }
 
     pub fn mkdir(&self, path: &str, options: &CreateOptions<'_>) -> Result<()> {
-        self.runtime.block_on(self.client.mkdir(path, options))
+        futures::executor::block_on(self.client.mkdir(path, options))
     }
 
     pub fn get_data(&self, path: &str) -> Result<(Vec<u8>, Stat)> {
-        self.runtime.block_on(self.client.get_data(path))
+        futures::executor::block_on(self.client.get_data(path))
     }
 
     pub fn set_data(&self, path: &str, data: &[u8], expected_version: Option<i32>) -> Result<Stat> {
-        self.runtime
-            .block_on(self.client.set_data(path, data, expected_version))
+        futures::executor::block_on(self.client.set_data(path, data, expected_version))
     }
 
     pub fn list_children(&self, path: &str) -> Result<Vec<String>> {
-        self.runtime.block_on(self.client.list_children(path))
+        futures::executor::block_on(self.client.list_children(path))
     }
 
     pub fn list_and_watch_children(&self, path: &str) -> Result<(Vec<String>, OneshotWatcher)> {
-        self.runtime
-            .block_on(self.client.list_and_watch_children(path))
+        futures::executor::block_on(self.client.list_and_watch_children(path))
     }
 
     pub fn get_children(&self, path: &str) -> Result<(Vec<String>, Stat)> {
-        self.runtime.block_on(self.client.get_children(path))
+        futures::executor::block_on(self.client.get_children(path))
     }
 
     pub fn watch(&self, path: &str, mode: AddWatchMode) -> Result<Watcher> {
-        self.runtime
-            .block_on(self.client.watch(path, mode))
-            .map(|watcher| Watcher {
-                watcher,
-                runtime: self.runtime.clone(),
-            })
+        futures::executor::block_on(self.client.watch(path, mode)).map(|watcher| Watcher {
+            watcher,
+            runtime: self.runtime.clone(),
+        })
     }
 
     pub fn multi_watcher(&self, watchers: impl IntoIterator<Item = Watcher>) -> MultiWatcher {
-        MultiWatcher::new(
-            self.runtime.clone(),
-            watchers.into_iter().map(|watcher| watcher.watcher),
-        )
+        MultiWatcher::new(watchers.into_iter().map(|watcher| watcher.watcher))
     }
 }
 
@@ -105,13 +96,15 @@ pub struct Watcher {
 
 impl Watcher {
     pub fn changed(&mut self) -> WatchedEvent {
-        self.runtime.block_on(self.watcher.changed())
+        futures::executor::block_on(self.watcher.changed())
     }
 
     pub fn remove(self) -> Result<(), Error> {
-        self.runtime.block_on(self.watcher.remove())
+        futures::executor::block_on(self.watcher.remove())
     }
 
+    /// In order to call this function you must ensure that you're not running in a tokio runtime.
+    /// Or else, run it in a `tokio::task::spawn_blocking` context.
     pub fn run_on_change(mut self, f: impl Fn(WatchedEvent) + Send + Sync + 'static) {
         self.runtime.spawn(async move {
             loop {
@@ -124,7 +117,6 @@ impl Watcher {
 
 pub struct MultiWatcher {
     watchers: Vec<PersistentWatcher>,
-    runtime: Handle,
 }
 
 #[derive(Debug)]
@@ -148,10 +140,9 @@ impl From<Entry> for WatchedEvent {
 }
 
 impl MultiWatcher {
-    fn new(runtime: Handle, watchers: impl IntoIterator<Item = PersistentWatcher>) -> Self {
+    fn new(watchers: impl IntoIterator<Item = PersistentWatcher>) -> Self {
         Self {
             watchers: watchers.into_iter().collect(),
-            runtime,
         }
     }
 
@@ -161,7 +152,7 @@ impl MultiWatcher {
                 .iter_mut()
                 .map(|watcher| Box::pin(watcher.changed())),
         );
-        let future = self.runtime.block_on(future);
+        let future = futures::executor::block_on(future);
 
         Entry {
             event: future.0,
@@ -174,7 +165,7 @@ impl MultiWatcher {
     pub fn remove(&mut self, entry: Entry) -> Result<()> {
         let watcher = self.watchers.remove(entry.index);
 
-        self.runtime.block_on(watcher.remove())
+        futures::executor::block_on(watcher.remove())
     }
 
     /// The `Entry` must come from the LAST `changed`, if not you
@@ -185,11 +176,11 @@ impl MultiWatcher {
     pub fn replace(&mut self, entry: Entry, watcher: Watcher) -> Result<()> {
         let watcher_to_remove = std::mem::replace(&mut self.watchers[entry.index], watcher.watcher);
 
-        self.runtime.block_on(watcher_to_remove.remove())
+        futures::executor::block_on(watcher_to_remove.remove())
     }
 
     pub fn remove_all(self) -> Result<()> {
-        let error = self.runtime.block_on(async {
+        let error = futures::executor::block_on(async {
             let mut error = None;
             for watcher in self.watchers {
                 // We should still try to close all the watchers.
