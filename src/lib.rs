@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{ops::Deref, sync::Arc};
 
 use tokio::runtime::Handle;
 use zookeeper_client::Client;
@@ -106,10 +106,13 @@ impl Watcher {
     /// In order to call this function you must ensure that you're not running in a tokio runtime.
     /// Or else, run it in a `tokio::task::spawn_blocking` context.
     pub fn run_on_change(mut self, f: impl Fn(WatchedEvent) + Send + Sync + 'static) {
+        let runtime = self.runtime.clone();
         self.runtime.spawn(async move {
+            let f = Arc::new(f);
             loop {
                 let event = self.watcher.changed().await;
-                f(event)
+                let f = f.clone();
+                runtime.spawn_blocking(move || f(event)).await.unwrap();
             }
         });
     }
@@ -153,7 +156,6 @@ impl MultiWatcher {
                 .map(|watcher| Box::pin(watcher.changed())),
         );
         let future = futures::executor::block_on(future);
-
         Entry {
             event: future.0,
             index: future.1,
